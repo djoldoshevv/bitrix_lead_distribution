@@ -3,6 +3,7 @@ import json
 import urllib.request
 import urllib.error
 import os
+from datetime import datetime, timezone
 
 app = Flask(__name__)
 
@@ -135,7 +136,23 @@ def distribute_lead():
             
             for m in managers:
                 tm_status = timeman_data.get(f"timeman_{m['id']}")
-                if not tm_status or tm_status.get("STATUS") == "OPENED" or "error" in tm_status:
+                # Если рабочий день открыт (STATUS == 'OPENED')
+                if tm_status and tm_status.get("STATUS") == "OPENED":
+                    # Проверяем, не зависла ли смена (открыта более 16 часов назад)
+                    start_str = tm_status.get("TIME_START")
+                    if start_str:
+                        try:
+                            start_dt = datetime.fromisoformat(start_str)
+                            now_dt = datetime.now(timezone.utc)
+                            diff_hours = (now_dt - start_dt).total_seconds() / 3600.0
+                            if diff_hours > 16:
+                                print(f"Смена менеджера {m['name']} (ID {m['id']}) была открыта {diff_hours:.1f} ч. назад. Считаем её закрытой.")
+                                continue
+                        except Exception as time_err:
+                            print(f"Ошибка при проверке времени смены для {m['name']}: {time_err}")
+                    working_pool.append(m)
+                # Если сведений нет (ошибка/модуль отключен у юзера), разрешаем распределение (fallback)
+                elif not tm_status or "error" in tm_status:
                     working_pool.append(m)
                     
         if not working_pool:
@@ -160,7 +177,14 @@ def distribute_lead():
                 if m['id'] == last_assigned_manager_id:
                     start_index = (idx + 1) % len(managers)
                     break
-                    
+        else:
+            # Если история пуста (вытеснена лидами других отделов),
+            # используем остаток от деления ID лида для псевдослучайного распределения
+            try:
+                start_index = int(lead_id) % len(managers)
+            except ValueError:
+                start_index = 0
+                
         selected_manager = None
         for i in range(len(managers)):
             check_idx = (start_index + i) % len(managers)

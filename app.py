@@ -3,6 +3,7 @@ import json
 import urllib.request
 import urllib.error
 import os
+from datetime import datetime, timezone
 
 app = Flask(__name__)
 
@@ -11,10 +12,10 @@ BITRIX_WEBHOOK_URL = os.environ.get("BITRIX_WEBHOOK_URL", "https://aquaman.bitri
 OPERATORS_DEPARTMENT_ID = int(os.environ.get("OPERATORS_DEPARTMENT_ID", 56))
 FALLBACK_MANAGER_IDS = os.environ.get("FALLBACK_MANAGER_IDS", "3948,11844,44402").split(",")
 
-# Вкл/Выкл проверку рабочего дня (поставьте False, если хотите распределять на всех без исключения)
+# Вкл/Выкл проверку рабочего дня
 CHECK_WORKDAY = True  
 
-def call_bitrix_api(method, params):
+def call_bitrix_api(method, params, timeout=8):
     """
     Выполняет POST-запрос к API Битрикс24.
     """
@@ -26,7 +27,7 @@ def call_bitrix_api(method, params):
         headers={'Content-Type': 'application/json'}
     )
     try:
-        with urllib.request.urlopen(req) as response:
+        with urllib.request.urlopen(req, timeout=timeout) as response:
             res_data = json.loads(response.read().decode('utf-8'))
             if 'error' in res_data:
                 raise Exception(f"Bitrix24 Error: {res_data.get('error')} - {res_data.get('error_description')}")
@@ -79,12 +80,9 @@ def find_lead_id_recursively(data):
 def distribute_lead():
     """
     Эндпоинт для распределения лида по алгоритму строгого Round-Robin.
-    Ожидает JSON от Битрикс24 (исходящий вебхук crm.lead.add).
     """
     try:
-        # Получаем данные от входящего запроса
         data = request.get_json(silent=True) or {}
-        # Если прислали как form-urlencoded (стандартный вебхук Битрикса)
         if not data and request.form:
             data = request.form.to_dict()
             
@@ -105,7 +103,7 @@ def distribute_lead():
             "recent_leads": "crm.lead.list?order[DATE_CREATE]=DESC&select[0]=ID&select[1]=ASSIGNED_BY_ID&limit=50"
         }
         
-        initial_batch = call_bitrix_api("batch", {"halt": 0, "cmd": initial_cmd}) or {}
+        initial_batch = call_bitrix_api("batch", {"halt": 0, "cmd": initial_cmd}, timeout=3.5) or {}
         batch_results = initial_batch.get("result", {})
         
         operators = batch_results.get("operators", [])
@@ -117,7 +115,6 @@ def distribute_lead():
                 "message": f"Не найдены активные сотрудники в департаменте {OPERATORS_DEPARTMENT_ID}"
             }), 500
             
-        # Формируем список менеджеров и сортируем его по ID для фиксированного порядка очереди
         managers = []
         for op in operators:
             managers.append({
@@ -135,15 +132,36 @@ def distribute_lead():
             for m in managers:
                 timeman_cmd[f"timeman_{m['id']}"] = f"timeman.status?USER_ID={m['id']}"
                 
-            timeman_batch = call_bitrix_api("batch", {"halt": 0, "cmd": timeman_cmd}) or {}
-            timeman_data = timeman_batch.get("result", {})
+            try:
+                # Ограничиваем запрос рабочего дня 3 секундами
+                timeman_batch = call_bitrix_api("batch", {"halt": 0, "cmd": timeman_cmd}, timeout=3.0) or {}
+                timeman_data = timeman_batch.get("result", {})
+            except Exception as tm_err:
+                # В случае зависания API Битрикса считаем всех активными, чтобы не ломать распределение
+                print(f"[WARNING] Ошибка получения статуса рабочего дня (таймаут): {tm_err}")
+                timeman_data = {}
             
             for m in managers:
                 tm_status = timeman_data.get(f"timeman_{m['id']}")
-                if not tm_status or tm_status.get("STATUS") == "OPENED" or "error" in tm_status:
+                # Если рабочий день открыт (STATUS == 'OPENED')
+                if tm_status and tm_status.get("STATUS") == "OPENED":
+                    # Проверяем, не зависла ли смена (открыта более 16 часов назад)
+                    start_str = tm_status.get("TIME_START")
+                    if start_str:
+                        try:
+                            start_dt = datetime.fromisoformat(start_str)
+                            now_dt = datetime.now(timezone.utc)
+                            diff_hours = (now_dt - start_dt).total_seconds() / 3600.0
+                            if diff_hours > 16:
+                                print(f"Смена менеджера {m['name']} (ID {m['id']}) была открыта {diff_hours:.1f} ч. назад. Считаем её закрытой.")
+                                continue
+                        except Exception as time_err:
+                            print(f"Ошибка при проверке времени смены для {m['name']}: {time_err}")
+                    working_pool.append(m)
+                # Если сведений нет (ошибка/модуль отключен у юзера), разрешаем распределение (fallback)
+                elif not tm_status or "error" in tm_status:
                     working_pool.append(m)
                     
-        # Если никто не открыл рабочий день
         if not working_pool:
             working_pool = [m for m in managers if m['id'] in FALLBACK_MANAGER_IDS]
             if not working_pool:
@@ -166,8 +184,14 @@ def distribute_lead():
                 if m['id'] == last_assigned_manager_id:
                     start_index = (idx + 1) % len(managers)
                     break
-                    
-        # Ищем первого доступного менеджера по кругу
+        else:
+            # Если история пуста (вытеснена лидами других отделов),
+            # используем остаток от деления ID лида для псевдослучайного распределения
+            try:
+                start_index = int(lead_id) % len(managers)
+            except ValueError:
+                start_index = 0
+                
         selected_manager = None
         for i in range(len(managers)):
             check_idx = (start_index + i) % len(managers)
@@ -185,7 +209,7 @@ def distribute_lead():
             "fields": {
                 "ASSIGNED_BY_ID": int(selected_manager['id'])
             }
-        })
+        }, timeout=3.0)
         print(f"[LOG] Лид {lead_id} успешно назначен на {selected_manager['name']} (ID {selected_manager['id']})")
         
         return jsonify({
@@ -204,9 +228,6 @@ def distribute_lead():
 
 @app.route('/health', methods=['GET'])
 def health_check():
-    """
-    Эндпоинт для проверки здоровья сервера (используется для keep-alive пинга).
-    """
     return "OK", 200
 
 if __name__ == '__main__':

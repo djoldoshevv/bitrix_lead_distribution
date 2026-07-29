@@ -15,7 +15,7 @@ FALLBACK_MANAGER_IDS = os.environ.get("FALLBACK_MANAGER_IDS", "3948,11844,44402"
 # Вкл/Выкл проверку рабочего дня
 CHECK_WORKDAY = True  
 
-def call_bitrix_api(method, params):
+def call_bitrix_api(method, params, timeout=8):
     """
     Выполняет POST-запрос к API Битрикс24.
     """
@@ -27,7 +27,7 @@ def call_bitrix_api(method, params):
         headers={'Content-Type': 'application/json'}
     )
     try:
-        with urllib.request.urlopen(req) as response:
+        with urllib.request.urlopen(req, timeout=timeout) as response:
             res_data = json.loads(response.read().decode('utf-8'))
             if 'error' in res_data:
                 raise Exception(f"Bitrix24 Error: {res_data.get('error')} - {res_data.get('error_description')}")
@@ -102,7 +102,7 @@ def distribute_lead():
             "recent_leads": "crm.lead.list?order[DATE_CREATE]=DESC&select[0]=ID&select[1]=ASSIGNED_BY_ID&limit=50"
         }
         
-        initial_batch = call_bitrix_api("batch", {"halt": 0, "cmd": initial_cmd}) or {}
+        initial_batch = call_bitrix_api("batch", {"halt": 0, "cmd": initial_cmd}, timeout=3.5) or {}
         batch_results = initial_batch.get("result", {})
         
         operators = batch_results.get("operators", [])
@@ -131,8 +131,14 @@ def distribute_lead():
             for m in managers:
                 timeman_cmd[f"timeman_{m['id']}"] = f"timeman.status?USER_ID={m['id']}"
                 
-            timeman_batch = call_bitrix_api("batch", {"halt": 0, "cmd": timeman_cmd}) or {}
-            timeman_data = timeman_batch.get("result", {})
+            try:
+                # Ограничиваем запрос рабочего дня 3 секундами
+                timeman_batch = call_bitrix_api("batch", {"halt": 0, "cmd": timeman_cmd}, timeout=3.0) or {}
+                timeman_data = timeman_batch.get("result", {})
+            except Exception as tm_err:
+                # В случае зависания API Битрикса считаем всех активными, чтобы не ломать распределение
+                print(f"[WARNING] Ошибка получения статуса рабочего дня (таймаут): {tm_err}")
+                timeman_data = {}
             
             for m in managers:
                 tm_status = timeman_data.get(f"timeman_{m['id']}")
@@ -202,7 +208,7 @@ def distribute_lead():
             "fields": {
                 "ASSIGNED_BY_ID": int(selected_manager['id'])
             }
-        })
+        }, timeout=3.0)
         
         return jsonify({
             "status": "success",

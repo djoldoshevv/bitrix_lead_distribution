@@ -15,6 +15,9 @@ FALLBACK_MANAGER_IDS = os.environ.get("FALLBACK_MANAGER_IDS", "3948,11844,44402"
 # Вкл/Выкл проверку рабочего дня
 CHECK_WORKDAY = True  
 
+# Вкл/Выкл скрипт распределения (False = скрипт отключен, лиды не переназначаются)
+ENABLED = False
+
 def call_bitrix_api(method, params, timeout=8):
     """
     Выполняет POST-запрос к API Битрикс24.
@@ -82,6 +85,8 @@ def distribute_lead():
     Эндпоинт для распределения лида по алгоритму строгого Round-Robin.
     """
     try:
+        if not ENABLED:
+            return jsonify({"status": "disabled", "message": "Распределение временно отключено"}), 200
         data = request.get_json(silent=True) or {}
         if not data and request.form:
             data = request.form.to_dict()

@@ -95,6 +95,7 @@ def distribute_lead():
             }), 400
             
         lead_id = str(lead_id).strip()
+        print(f"[LOG] Начинаем распределение для Лида ID: {lead_id}")
             
         # 1. Получаем операторов и историю за один пакетный запрос
         initial_cmd = {
@@ -121,6 +122,7 @@ def distribute_lead():
                 "name": f"{op.get('NAME', '')} {op.get('LAST_NAME', '')}".strip() or f"Operator #{op.get('ID')}"
             })
         managers.sort(key=lambda x: x['id'])
+        print(f"[DEBUG] Менеджеры ({len(managers)}): {[(m['name'], m['id']) for m in managers]}")
         
         # 2. Проверяем рабочий день сотрудников
         working_pool = []
@@ -142,6 +144,8 @@ def distribute_lead():
             
             for m in managers:
                 tm_status = timeman_data.get(f"timeman_{m['id']}")
+                status_val = tm_status.get("STATUS") if isinstance(tm_status, dict) else None
+                print(f"[DEBUG] TimeMan {m['name']} (ID {m['id']}): status={status_val}, raw={tm_status}")
                 # Если рабочий день открыт (STATUS == 'OPENED')
                 if tm_status and tm_status.get("STATUS") == "OPENED":
                     # Проверяем, не зависла ли смена (открыта более 16 часов назад)
@@ -152,29 +156,39 @@ def distribute_lead():
                             now_dt = datetime.now(timezone.utc)
                             diff_hours = (now_dt - start_dt).total_seconds() / 3600.0
                             if diff_hours > 16:
-                                print(f"Смена менеджера {m['name']} (ID {m['id']}) была открыта {diff_hours:.1f} ч. назад. Считаем её закрытой.")
+                                print(f"[DEBUG] Смена {m['name']} (ID {m['id']}) открыта {diff_hours:.1f}ч назад -> ПРОПУСКАЕМ")
                                 continue
+                            else:
+                                print(f"[DEBUG] Смена {m['name']} (ID {m['id']}) открыта {diff_hours:.1f}ч назад -> АКТИВЕН")
                         except Exception as time_err:
-                            print(f"Ошибка при проверке времени смены для {m['name']}: {time_err}")
+                            print(f"[DEBUG] Ошибка парсинга времени для {m['name']}: {time_err}")
                     working_pool.append(m)
                 # Если сведений нет (ошибка/модуль отключен у юзера), разрешаем распределение (fallback)
                 elif not tm_status or "error" in tm_status:
+                    print(f"[DEBUG] {m['name']} (ID {m['id']}): нет данных timeman -> добавляем в пул (fallback)")
                     working_pool.append(m)
+                else:
+                    print(f"[DEBUG] {m['name']} (ID {m['id']}): статус {status_val} -> НЕ в пуле")
                     
         if not working_pool:
+            print(f"[DEBUG] Рабочий пул пуст! Используем fallback менеджеров: {FALLBACK_MANAGER_IDS}")
             working_pool = [m for m in managers if m['id'] in FALLBACK_MANAGER_IDS]
             if not working_pool:
                 working_pool = managers
+        print(f"[DEBUG] Рабочий пул ({len(working_pool)}): {[(m['name'], m['id']) for m in working_pool]}")
                 
         # 3. Находим ID менеджера, который получил САМЫЙ ПОСЛЕДНИЙ лид
         last_assigned_manager_id = None
         if recent_leads:
+            print(f"[DEBUG] Последние 5 лидов в истории: {[(str(l.get('ID')), str(l.get('ASSIGNED_BY_ID'))) for l in recent_leads[:5]]}")
             for l in recent_leads:
                 if str(l.get("ID")) != str(lead_id):
                     assigned_id = str(l.get("ASSIGNED_BY_ID"))
                     if any(m['id'] == assigned_id for m in managers):
                         last_assigned_manager_id = assigned_id
                         break
+        else:
+            print(f"[DEBUG] История лидов ПУСТА!")
                         
         # 4. Алгоритм строгого циклического распределения (Round-Robin):
         start_index = 0
@@ -183,6 +197,7 @@ def distribute_lead():
                 if m['id'] == last_assigned_manager_id:
                     start_index = (idx + 1) % len(managers)
                     break
+            print(f"[DEBUG] Последний назначенный: ID {last_assigned_manager_id} -> start_index={start_index}")
         else:
             # Если история пуста (вытеснена лидами других отделов),
             # используем остаток от деления ID лида для псевдослучайного распределения
@@ -190,6 +205,7 @@ def distribute_lead():
                 start_index = int(lead_id) % len(managers)
             except ValueError:
                 start_index = 0
+            print(f"[DEBUG] История пуста для нашего отдела -> start_index={start_index} (lead_id % {len(managers)})")
                 
         selected_manager = None
         for i in range(len(managers)):
@@ -202,6 +218,8 @@ def distribute_lead():
         if not selected_manager:
             selected_manager = working_pool[0]
             
+        print(f"[LOG] Лид {lead_id} -> назначаем на {selected_manager['name']} (ID {selected_manager['id']})")
+        
         # 5. Назначаем ответственного менеджера в Битрикс24
         call_bitrix_api("crm.lead.update", {
             "id": lead_id,
@@ -209,6 +227,7 @@ def distribute_lead():
                 "ASSIGNED_BY_ID": int(selected_manager['id'])
             }
         }, timeout=3.0)
+        print(f"[LOG] Лид {lead_id} успешно назначен на {selected_manager['name']} (ID {selected_manager['id']})")
         
         return jsonify({
             "status": "success",

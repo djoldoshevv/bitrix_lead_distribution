@@ -81,7 +81,7 @@ def find_lead_id_recursively(data):
 
 def distribute_lead_logic():
     """
-    Основная логика распределения лидов по Round-Robin.
+    Ускоренная логика распределения лидов (всего 2 HTTP-запроса).
     """
     try:
         if not ENABLED:
@@ -100,13 +100,17 @@ def distribute_lead_logic():
             }), 400
             
         lead_id = str(lead_id).strip()
-        print(f"[LOG] Начинаем распределение для Лида ID: {lead_id}")
+        print(f"[LOG] Начинаем быструю обработку Лида ID: {lead_id}")
             
-        # 1. Получаем операторов и историю за один пакетный запрос
+        # 1. ЗАПРОС 1из2: Совмещенный пакетный запрос (операторы + история + статусы смен)
+        known_manager_ids = list(set(["3948", "11844", "44402", "216", "2796"] + [m_id.strip() for m_id in FALLBACK_MANAGER_IDS if m_id.strip()]))
+        
         initial_cmd = {
             "operators": f"user.get?ACTIVE=true&UF_DEPARTMENT={OPERATORS_DEPARTMENT_ID}",
             "recent_leads": "crm.lead.list?order[DATE_CREATE]=DESC&select[0]=ID&select[1]=ASSIGNED_BY_ID&limit=50"
         }
+        for m_id in known_manager_ids:
+            initial_cmd[f"timeman_{m_id}"] = f"timeman.status?USER_ID={m_id}"
         
         initial_batch = call_bitrix_api("batch", {"halt": 0, "cmd": initial_cmd}, timeout=3.5) or {}
         batch_results = initial_batch.get("result", {})
@@ -127,26 +131,14 @@ def distribute_lead_logic():
                 "name": f"{op.get('NAME', '')} {op.get('LAST_NAME', '')}".strip() or f"Operator #{op.get('ID')}"
             })
         managers.sort(key=lambda x: x['id'])
-        print(f"[DEBUG] Менеджеры ({len(managers)}): {[(m['name'], m['id']) for m in managers]}")
         
-        # 2. Проверяем рабочий день сотрудников
+        # 2. Формируем рабочий пул
         working_pool = []
         if not CHECK_WORKDAY:
             working_pool = managers
         else:
-            timeman_cmd = {}
             for m in managers:
-                timeman_cmd[f"timeman_{m['id']}"] = f"timeman.status?USER_ID={m['id']}"
-                
-            try:
-                timeman_batch = call_bitrix_api("batch", {"halt": 0, "cmd": timeman_cmd}, timeout=3.0) or {}
-                timeman_data = timeman_batch.get("result", {})
-            except Exception as tm_err:
-                print(f"[WARNING] Ошибка получения статуса рабочего дня (таймаут): {tm_err}")
-                timeman_data = {}
-            
-            for m in managers:
-                tm_status = timeman_data.get(f"timeman_{m['id']}")
+                tm_status = batch_results.get(f"timeman_{m['id']}")
                 status_val = tm_status.get("STATUS") if isinstance(tm_status, dict) else None
                 print(f"[DEBUG] TimeMan {m['name']} (ID {m['id']}): status={status_val}")
                 if tm_status and tm_status.get("STATUS") == "OPENED":
@@ -168,15 +160,12 @@ def distribute_lead_logic():
         # 3. Находим ID менеджера, который получил САМЫЙ ПОСЛЕДНИЙ лид
         last_assigned_manager_id = None
         if recent_leads:
-            print(f"[DEBUG] Последние 5 лидов в истории: {[(str(l.get('ID')), str(l.get('ASSIGNED_BY_ID'))) for l in recent_leads[:5]]}")
             for l in recent_leads:
                 if str(l.get("ID")) != str(lead_id):
                     assigned_id = str(l.get("ASSIGNED_BY_ID"))
                     if any(m['id'] == assigned_id for m in managers):
                         last_assigned_manager_id = assigned_id
                         break
-        else:
-            print(f"[DEBUG] История лидов ПУСТА!")
                         
         # 4. Алгоритм строгого циклического распределения (Round-Robin):
         start_index = 0
@@ -191,7 +180,7 @@ def distribute_lead_logic():
                 start_index = int(lead_id) % len(managers)
             except ValueError:
                 start_index = 0
-            print(f"[DEBUG] История пуста для нашего отдела -> start_index={start_index} (lead_id % {len(managers)})")
+            print(f"[DEBUG] История пуста -> start_index={start_index}")
                 
         selected_manager = None
         for i in range(len(managers)):
@@ -204,9 +193,9 @@ def distribute_lead_logic():
         if not selected_manager:
             selected_manager = working_pool[0]
             
-        print(f"[LOG] Лид {lead_id} -> назначаем на {selected_manager['name']} (ID {selected_manager['id']})")
+        print(f"[LOG] Лид {lead_id} -> быстро назначаем на {selected_manager['name']} (ID {selected_manager['id']})")
         
-        # 5. Назначаем ответственного менеджера в Битрикс24
+        # 5. ЗАПРОС 2из2: Назначаем ответственного менеджера в Битрикс24
         call_bitrix_api("crm.lead.update", {
             "id": lead_id,
             "fields": {

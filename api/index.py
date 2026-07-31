@@ -235,3 +235,57 @@ def distribute_lead():
 @app.route('/health', methods=['GET'])
 def health_check():
     return "OK", 200
+
+@app.route('/close-shifts', methods=['GET'])
+def close_shifts():
+    """
+    Закрывает все открытые смены менеджеров отдела.
+    Вызывается автоматически по крону в 00:00.
+    """
+    try:
+        # Получаем список операторов
+        operators = call_bitrix_api("user.get", {"ACTIVE": True, "UF_DEPARTMENT": OPERATORS_DEPARTMENT_ID}, timeout=5) or []
+        
+        if not operators:
+            return jsonify({"status": "error", "message": "Нет операторов"}), 500
+        
+        # Проверяем статусы
+        timeman_cmd = {}
+        for op in operators:
+            op_id = str(op.get("ID"))
+            timeman_cmd[f"tm_{op_id}"] = f"timeman.status?USER_ID={op_id}"
+        
+        tm_batch = call_bitrix_api("batch", {"halt": 0, "cmd": timeman_cmd}, timeout=5) or {}
+        tm_data = tm_batch.get("result", {})
+        
+        closed = []
+        errors = []
+        
+        for op in operators:
+            op_id = str(op.get("ID"))
+            op_name = f"{op.get('NAME', '')} {op.get('LAST_NAME', '')}".strip()
+            tm = tm_data.get(f"tm_{op_id}")
+            status = tm.get("STATUS") if isinstance(tm, dict) else None
+            
+            if status == "OPENED":
+                print(f"[CRON] Закрываем смену: {op_name} (ID {op_id})")
+                try:
+                    call_bitrix_api("timeman.close", {"USER_ID": int(op_id)}, timeout=5)
+                    closed.append(f"{op_name} (ID {op_id})")
+                    print(f"[CRON] Смена {op_name} успешно закрыта")
+                except Exception as close_err:
+                    errors.append(f"{op_name}: {str(close_err)}")
+                    print(f"[CRON] Ошибка закрытия смены {op_name}: {close_err}")
+            else:
+                print(f"[CRON] {op_name} (ID {op_id}): статус {status} — пропускаем")
+        
+        return jsonify({
+            "status": "success",
+            "closed": closed,
+            "errors": errors,
+            "message": f"Закрыто смен: {len(closed)}, ошибок: {len(errors)}"
+        }), 200
+        
+    except Exception as e:
+        print(f"[CRON ERROR] {str(e)}")
+        return jsonify({"status": "error", "message": str(e)}), 500

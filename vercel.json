@@ -1,4 +1,10 @@
 {
+  "crons": [
+    {
+      "path": "/close-shifts",
+      "schedule": "0 18 * * *"
+    }
+  ],
   "rewrites": [
     {
       "source": "/(.*)",

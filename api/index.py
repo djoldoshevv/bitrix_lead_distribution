@@ -280,7 +280,9 @@ def close_shifts_logic():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route('/', methods=['GET', 'POST'])
+@app.route('/api/index', methods=['GET', 'POST'])
 @app.route('/<path:subpath>', methods=['GET', 'POST'])
+@app.route('/api/index/<path:subpath>', methods=['GET', 'POST'])
 def universal_router(subpath=''):
     """
     Универсальный роутер для обработки всех путей Vercel.

@@ -16,7 +16,7 @@ FALLBACK_MANAGER_IDS = os.environ.get("FALLBACK_MANAGER_IDS", "3948,11844,44402"
 CHECK_WORKDAY = True  
 
 # Вкл/Выкл скрипт распределения (False = скрипт отключен, лиды не переназначаются)
-ENABLED = False
+ENABLED = True
 
 def call_bitrix_api(method, params, timeout=8):
     """

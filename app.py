@@ -79,14 +79,14 @@ def find_lead_id_recursively(data):
                 
     return None
 
-@app.route('/distribute', methods=['POST'])
-def distribute_lead():
+def distribute_lead_logic():
     """
-    Эндпоинт для распределения лида по алгоритму строгого Round-Robin.
+    Основная логика распределения лидов по Round-Robin.
     """
     try:
         if not ENABLED:
             return jsonify({"status": "disabled", "message": "Распределение временно отключено"}), 200
+            
         data = request.get_json(silent=True) or {}
         if not data and request.form:
             data = request.form.to_dict()
@@ -139,11 +139,9 @@ def distribute_lead():
                 timeman_cmd[f"timeman_{m['id']}"] = f"timeman.status?USER_ID={m['id']}"
                 
             try:
-                # Ограничиваем запрос рабочего дня 3 секундами
                 timeman_batch = call_bitrix_api("batch", {"halt": 0, "cmd": timeman_cmd}, timeout=3.0) or {}
                 timeman_data = timeman_batch.get("result", {})
             except Exception as tm_err:
-                # В случае зависания API Битрикса считаем всех активными, чтобы не ломать распределение
                 print(f"[WARNING] Ошибка получения статуса рабочего дня (таймаут): {tm_err}")
                 timeman_data = {}
             
@@ -187,13 +185,13 @@ def distribute_lead():
                 if m['id'] == last_assigned_manager_id:
                     start_index = (idx + 1) % len(managers)
                     break
+            print(f"[DEBUG] Последний назначенный: ID {last_assigned_manager_id} -> start_index={start_index}")
         else:
-            # Если история пуста (вытеснена лидами других отделов),
-            # используем остаток от деления ID лида для псевдослучайного распределения
             try:
                 start_index = int(lead_id) % len(managers)
             except ValueError:
                 start_index = 0
+            print(f"[DEBUG] История пуста для нашего отдела -> start_index={start_index} (lead_id % {len(managers)})")
                 
         selected_manager = None
         for i in range(len(managers)):
@@ -231,15 +229,9 @@ def distribute_lead():
             "message": str(e)
         }), 500
 
-@app.route('/health', methods=['GET'])
-def health_check():
-    return "OK", 200
-
-@app.route('/close-shifts', methods=['GET'])
-def close_shifts():
+def close_shifts_logic():
     """
     Закрывает все открытые смены менеджеров отдела.
-    Вызывается автоматически по крону в 00:00.
     """
     try:
         operators = call_bitrix_api("user.get", {"ACTIVE": True, "UF_DEPARTMENT": OPERATORS_DEPARTMENT_ID}, timeout=5) or []
@@ -286,6 +278,30 @@ def close_shifts():
     except Exception as e:
         print(f"[CRON ERROR] {str(e)}")
         return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/', methods=['GET', 'POST'])
+@app.route('/<path:subpath>', methods=['GET', 'POST'])
+def universal_router(subpath=''):
+    """
+    Универсальный роутер для обработки всех путей Vercel.
+    """
+    path_str = str(request.path).lower()
+    sub_str = str(subpath).lower()
+    
+    if 'close-shifts' in path_str or 'close-shifts' in sub_str or request.args.get('action') == 'close-shifts':
+        return close_shifts_logic()
+        
+    if 'health' in path_str or 'health' in sub_str:
+        return jsonify({"status": "OK", "service": "Bitrix Lead Distribution"}), 200
+        
+    if request.method == 'GET':
+        return jsonify({
+            "status": "OK", 
+            "service": "Bitrix Lead Distribution Service",
+            "endpoints": ["/distribute (POST)", "/close-shifts (GET)", "/health (GET)"]
+        }), 200
+        
+    return distribute_lead_logic()
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))

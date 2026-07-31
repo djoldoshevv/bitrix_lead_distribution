@@ -287,13 +287,12 @@ def universal_router(subpath=''):
     """
     Универсальный роутер для обработки всех путей Vercel.
     """
-    path_str = str(request.path).lower()
-    sub_str = str(subpath).lower()
+    full_str = f"{request.path} {request.url} {request.headers.get('x-forwarded-uri', '')} {subpath}".lower()
     
-    if 'close-shifts' in path_str or 'close-shifts' in sub_str or request.args.get('action') == 'close-shifts':
+    if 'close-shifts' in full_str or request.args.get('action') == 'close-shifts':
         return close_shifts_logic()
         
-    if 'health' in path_str or 'health' in sub_str:
+    if 'health' in full_str:
         return jsonify({"status": "OK", "service": "Bitrix Lead Distribution"}), 200
         
     if request.method == 'GET':

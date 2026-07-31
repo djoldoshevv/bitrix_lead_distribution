@@ -150,25 +150,10 @@ def distribute_lead():
             for m in managers:
                 tm_status = timeman_data.get(f"timeman_{m['id']}")
                 status_val = tm_status.get("STATUS") if isinstance(tm_status, dict) else None
-                print(f"[DEBUG] TimeMan {m['name']} (ID {m['id']}): status={status_val}, raw={tm_status}")
-                # Если рабочий день открыт (STATUS == 'OPENED')
+                print(f"[DEBUG] TimeMan {m['name']} (ID {m['id']}): status={status_val}")
                 if tm_status and tm_status.get("STATUS") == "OPENED":
-                    # Проверяем, не зависла ли смена (открыта более 16 часов назад)
-                    start_str = tm_status.get("TIME_START")
-                    if start_str:
-                        try:
-                            start_dt = datetime.fromisoformat(start_str)
-                            now_dt = datetime.now(timezone.utc)
-                            diff_hours = (now_dt - start_dt).total_seconds() / 3600.0
-                            if diff_hours > 16:
-                                print(f"[DEBUG] Смена {m['name']} (ID {m['id']}) открыта {diff_hours:.1f}ч назад -> ПРОПУСКАЕМ")
-                                continue
-                            else:
-                                print(f"[DEBUG] Смена {m['name']} (ID {m['id']}) открыта {diff_hours:.1f}ч назад -> АКТИВЕН")
-                        except Exception as time_err:
-                            print(f"[DEBUG] Ошибка парсинга времени для {m['name']}: {time_err}")
+                    print(f"[DEBUG] {m['name']} (ID {m['id']}): OPENED -> в пуле")
                     working_pool.append(m)
-                # Если сведений нет (ошибка/модуль отключен у юзера), разрешаем распределение (fallback)
                 elif not tm_status or "error" in tm_status:
                     print(f"[DEBUG] {m['name']} (ID {m['id']}): нет данных timeman -> добавляем в пул (fallback)")
                     working_pool.append(m)
